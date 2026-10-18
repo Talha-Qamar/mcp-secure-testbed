@@ -15,6 +15,23 @@ This tool is designed for legitimate OSINT research purposes. Please:
 - Use responsibly and ethically
 - Be aware that some sites may rate-limit or block automated searches
 
+## Security
+
+This server implements several security measures to prevent command injection attacks:
+
+### Input Validation
+- **Usernames**: Only alphanumeric characters, underscores, hyphens, and periods are allowed (max 100 characters)
+- **URLs**: Must be valid HTTP/HTTPS URLs without shell metacharacters
+- **Tags**: Only alphanumeric characters, underscores, and hyphens are allowed
+
+### Safe Command Execution
+- Uses `execFile()` instead of `exec()` to prevent shell interpolation
+- All command arguments are passed as arrays, not concatenated strings
+- Docker commands are executed without shell interpretation
+
+### Reporting Security Issues
+If you discover a security vulnerability, please report it by opening an issue or contacting the maintainers directly. We take security seriously and will respond promptly.
+
 ## Requirements
 
 - Node.js (v18 or later)
@@ -108,10 +125,10 @@ npm run build
 - Name: `search_username`
 - Description: Search for a username across social networks and sites
 - Parameters:
-  * `username` (required): Username to search for
+  * `username` (required): Username to search for (alphanumeric, underscores, hyphens, periods only; max 100 chars)
   * `format` (optional, default: "pdf"): Output format (txt, html, pdf, json, csv, xmind)
   * `use_all_sites` (optional, default: false): Use all available sites instead of top 500
-  * `tags` (optional): Array of tags to filter sites (e.g., ["photo", "dating"])
+  * `tags` (optional): Array of tags to filter sites (alphanumeric, underscores, hyphens only)
 
 Example:
 ```json
@@ -175,6 +192,9 @@ docker ps
 - "MAIGRET_REPORTS_DIR environment variable must be set": Add the environment variable to your configuration
 - "Error creating reports directory": Check directory permissions and path
 - "Error executing maigret": Check Docker logs and ensure the container has proper permissions
+- "Invalid username": Username contains invalid characters. Use only alphanumeric, underscores, hyphens, and periods
+- "Invalid URL": URL is malformed or contains prohibited characters
+- "Invalid tag": Tag contains invalid characters. Use only alphanumeric, underscores, and hyphens
 
 ## Contributing
 

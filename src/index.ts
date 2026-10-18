@@ -7,13 +7,13 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { platform } from 'os';
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const DOCKER_IMAGE = 'soxoj/maigret:latest';
 
 interface SearchUsernameArgs {
@@ -35,6 +35,51 @@ interface ExecResult {
 
 function sanitizeFilename(filename: string): string {
   return filename.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+}
+
+/**
+ * Validates username to prevent command injection.
+ * Only allows alphanumeric characters, underscores, hyphens, and periods.
+ */
+function isValidUsername(username: string): boolean {
+  // Max length check to prevent DoS
+  if (username.length === 0 || username.length > 100) {
+    return false;
+  }
+  // Only allow safe characters commonly found in usernames
+  return /^[a-zA-Z0-9_.-]+$/.test(username);
+}
+
+/**
+ * Validates URL to prevent command injection.
+ * Must be a valid HTTP/HTTPS URL.
+ */
+function isValidUrl(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    // Only allow http and https protocols
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return false;
+    }
+    // Check for suspicious characters that could be used for injection
+    if (/[;&|`$(){}[\]<>\\]/.test(urlString)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates tags to prevent command injection.
+ * Only allows alphanumeric characters, underscores, and hyphens.
+ */
+function isValidTag(tag: string): boolean {
+  if (tag.length === 0 || tag.length > 50) {
+    return false;
+  }
+  return /^[a-zA-Z0-9_-]+$/.test(tag);
 }
 
 function isSearchUsernameArgs(args: unknown): args is SearchUsernameArgs {
@@ -96,10 +141,14 @@ class MaigretServer {
     });
   }
 
-  private async execCommand(command: string): Promise<ExecResult> {
-    console.error('Executing command:', command);
+  /**
+   * Executes a command safely using execFile (no shell interpolation).
+   * Arguments are passed as an array to prevent command injection.
+   */
+  private async execCommand(cmd: string, args: string[]): Promise<ExecResult> {
+    console.error('Executing command:', cmd, args.join(' '));
     try {
-      const result = await execAsync(command, {
+      const result = await execFileAsync(cmd, args, {
         maxBuffer: 10 * 1024 * 1024
       });
       console.error('Command output:', result.stdout);
@@ -115,18 +164,18 @@ class MaigretServer {
     try {
       console.error('Checking Docker...');
       try {
-        await this.execCommand('docker --version');
+        await this.execCommand('docker', ['--version']);
       } catch (error) {
         throw new Error('Docker is not installed or not running. Please install Docker and try again.');
       }
 
       console.error('Checking if maigret image exists...');
       try {
-        await this.execCommand(`docker image inspect ${DOCKER_IMAGE}`);
+        await this.execCommand('docker', ['image', 'inspect', DOCKER_IMAGE]);
         console.error('Maigret image found');
       } catch (error) {
         console.error('Maigret image not found, pulling...');
-        await this.execCommand(`docker pull ${DOCKER_IMAGE}`);
+        await this.execCommand('docker', ['pull', DOCKER_IMAGE]);
         console.error('Maigret image pulled successfully');
       }
     } catch (error) {
@@ -208,38 +257,57 @@ class MaigretServer {
               );
             }
 
-            const { 
-              username, 
+            const {
+              username,
               format = 'pdf',
               use_all_sites = false,
               tags = []
             } = request.params.arguments;
 
+            // Security: Validate username to prevent command injection
+            if (!isValidUsername(username)) {
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                'Invalid username. Username must contain only alphanumeric characters, underscores, hyphens, and periods (max 100 characters).'
+              );
+            }
+
+            // Security: Validate all tags
+            for (const tag of tags) {
+              if (!isValidTag(tag)) {
+                throw new McpError(
+                  ErrorCode.InvalidParams,
+                  `Invalid tag: "${tag}". Tags must contain only alphanumeric characters, underscores, and hyphens.`
+                );
+              }
+            }
+
             const safeUsername = sanitizeFilename(username);
             const reportPath = join(this.reportsDir, `report_${safeUsername}.${format}`);
 
-            // Build command arguments
-            const args = [
+            // Build docker command arguments (passed as array to prevent shell injection)
+            const dockerArgs = [
+              'run', '--rm',
+              '-v', `${this.reportsDir}:/app/reports`,
+              DOCKER_IMAGE,
               username,
               `--${format}`,
               '--no-color',
               '--no-progressbar',
-              '-n', '200'  // Increase max connections from default 100 to 200
+              '-n', '200'
             ];
 
             if (use_all_sites) {
-              args.push('-a');
+              dockerArgs.push('-a');
             }
 
             if (tags.length > 0) {
-              args.push('--tags', tags.join(','));
+              dockerArgs.push('--tags', tags.join(','));
             }
 
-            // Run maigret in Docker
-            const { stdout, stderr } = await this.execCommand(
-              `docker run --rm -v "${this.reportsDir}:/app/reports" ${DOCKER_IMAGE} ${args.join(' ')}`
-            );
-            
+            // Run maigret in Docker using execFile (safe from shell injection)
+            const { stdout, stderr } = await this.execCommand('docker', dockerArgs);
+
             return {
               content: [
                 {
@@ -260,19 +328,29 @@ class MaigretServer {
 
             const { url, format = 'pdf' } = request.params.arguments;
 
-            const args = [
+            // Security: Validate URL to prevent command injection
+            if (!isValidUrl(url)) {
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                'Invalid URL. Must be a valid HTTP or HTTPS URL without special shell characters.'
+              );
+            }
+
+            // Build docker command arguments (passed as array to prevent shell injection)
+            const dockerArgs = [
+              'run', '--rm',
+              '-v', `${this.reportsDir}:/app/reports`,
+              DOCKER_IMAGE,
               '--parse', url,
               `--${format}`,
               '--no-color',
               '--no-progressbar',
-              '--timeout', '60',  // 60 second timeout per request
-              '-n', '200'  // Increase max connections from default 100 to 200
+              '--timeout', '60',
+              '-n', '200'
             ];
 
-            // Run maigret in Docker
-            const { stdout, stderr } = await this.execCommand(
-              `docker run --rm -v "${this.reportsDir}:/app/reports" ${DOCKER_IMAGE} ${args.join(' ')}`
-            );
+            // Run maigret in Docker using execFile (safe from shell injection)
+            const { stdout, stderr } = await this.execCommand('docker', dockerArgs);
 
             return {
               content: [
